@@ -1,0 +1,432 @@
+---
+title: "Analyzing Corona Data with R"
+output: html_notebook
+---
+
+# Die Daten und ihre erste Transformation
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+```
+
+Die Daten sind unter [on GitHub, a Data Repository provided by the Johns Hopkins CSSE](https://github.com/CSSEGISandData/COVID-19) zu finden; man muss auf den RAW-Button zu knicken, um die URL der CSV-Daten zu erhalten.
+
+```{r}
+corona_data <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+```
+
+Wir reduzieren die Daten auf die Länder, die uns interessieren:
+
+```{r}
+data <- corona_data %>%
+  filter(`Country/Region` == "Germany" | `Country/Region` == "Italy" |  `Country/Region` == "China"  |  `Country/Region` == "US" | `Country/Region` == "France"  | `Country/Region` == "New Zealand" | `Country/Region` == "Israel") %>%
+  select(-`Province/State`) %>%
+  select(-Lat,-Long) %>%
+  group_by(`Country/Region`) %>%
+  summarise_each(list(sum))
+```
+
+Nun müssen Spalten und Zeilen getauscht werden. Leider wird dann der Header entfernt, die erste Zeile wird dann als Header verwendet:
+
+```{r}
+n <- data$`Country/Region` 
+data <- as.data.frame(t(data[,-1])) 
+colnames(data) <- n 
+data <- tibble::rownames_to_column(data, "Day")
+str(data) 
+```
+
+Die Datumswerte müssen noch zum Datentyp Datum konvertiert werden:
+
+```{r}
+data <- data %>%
+  mutate(Day = as.Date(Day,"%m/%d/%y"))
+```
+
+Mit der reshape-Library werden die Daten in ein spezielles Format gebracht, dass wir in diesem Fall benötigen für ggplot2:
+
+```{r}
+library(reshape2)
+(d <- melt(data, id.vars="Day"))
+```
+
+# Anzahl Infektionen
+
+Infektionsdaten sollten mit Vorsicht genossen werden: 
+
+* Nicht jedes Land hat jeden Tag frische Daten, das RKI in Deutschland bekommt die Daten zum Teil nicht am Wochenende!
+
+* In manchen Ländern werden Tests anders durchgeführt als in anderen Ländern; in Deutschland muss Kontakt zu einer Verdachtsperson oder zur Zeit die Reise in ein Risikogebiet + in beiden Fällen Symptome vorliegen, um getestet zu werden.
+
+
+```{r}
+ggplot(d, aes(Day,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Infections beginning with China's reports") + 
+  xlab("Date") + 
+  ylab("Infections")
+```
+
+In der Untersuchung, die als Inspiration wirkte, wurde die 20. Infektion als Startpunkt genommen:
+
+```{r}
+d2 <- d %>%
+  filter(value > 19) %>%
+  group_by(variable) %>%
+  mutate(id = row_number())
+
+ggplot(d2, aes(id,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Infections counted from 20th Case") + 
+  xlab("Date") + 
+  ylab("Infections")
+```
+
+Die Frage ist, warum gerade 20, warum nicht 21 oder 17? Hier nun einmal von der ersten Infektion aus geplottet:
+
+```{r}
+d3 <- d %>%
+  filter(value > 0) %>%
+  group_by(variable) %>%
+  mutate(id = row_number())
+
+# plot
+ggplot(d3, aes(id,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Infections counted from first case") + 
+  xlab("Date") + 
+  ylab("Infections")
+```
+
+
+Als Log2 auf der Y-Achse:
+
+```{r}
+ggplot(d3, aes(id,value, col=variable)) + 
+  geom_line() +
+  scale_y_continuous(trans = 'log2') +
+  ggtitle("Infections counted from first reported case in each country, log2 scale on y axis") + 
+  xlab("Date") + 
+  ylab("Infections")
+```
+
+# Anzahl Tests
+
+
+
+Some commentors wanted to see how many tests were performed, and this is a tricky one as [data provided by ourworldindata.org](https://ourworldindata.org/covid-testing) differs in the way how tests are performed and counted:
+
+* In some countries, the number of tested individuals is reported
+* In other countries, the number of tests is reported
+* and then, there are countries where the data units are completely unclear
+
+In Germany, for example, the high number of tests could be a result of one person being tested several times. Let's look at the data anyway. The current data is from April 6th, 2020.
+
+```{r}
+library(readxl)
+tests <- read_excel("covid-testing-06-Apr.xlsx")
+```
+
+```{r}
+(my_tests <- tests %>%
+  filter(Entity == "France - units unclear" | Entity == "Germany - samples tested" | Entity == "Italy - units unclear" | Entity == "South Korea - cases tested" | Entity == "United States - specimens tested (CDC)" | Entity == "United States - inconsistent units (COVID Tracking Project)") %>%
+   select(Entity,Date, `Cumulative total`,`Cumulative total per million`))
+```
+
+
+```{r}
+library(ggrepel)
+ggplot(my_tests, aes(x = Date, y = `Cumulative total`)) +
+    geom_point(aes(color = Entity,  size = `Cumulative total per million`)) +
+    geom_text_repel(aes(label=Entity)) + # Repel takes care of putting the labels close to the data points but without leaving the grid
+  #scale_y_continuous(trans = 'log2') +
+  labs(title="Performed Tests on Day of Year, Size reflects tests performed per million", x ="Date", y = "Tests performed") +
+  theme(legend.position = "none")
+```
+
+Manche Labels überlappen die Datenpunkte, das sollte noch gefixt werden.
+
+
+# Tote
+
+```{r}
+# Get the data
+corona_deaths <- read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+```
+
+
+
+```{r} 
+# Transform the data and remove the Diamond Princess
+data_deaths <- corona_deaths %>%
+  filter(`Country/Region` == "Germany" | `Country/Region` == "Italy" |  `Country/Region` == "China"  |  `Country/Region` == "US" | `Country/Region` == "France" | `Country/Region` == "New Zealand" | `Country/Region` == "Israel") %>%
+  filter(`Province/State` !="Diamond Princess" | is.na(`Province/State`)) %>%
+   select(-`Province/State`) %>%
+  select(-Lat,-Long) %>%
+  group_by(`Country/Region`) %>%
+  summarise_each(list(sum))
+
+# Swap rows and columns and convert date
+n <- data_deaths$`Country/Region`
+data_deaths <- as.data.frame(t(data_deaths[,-1]))
+colnames(data_deaths) <- n
+data_deaths <- tibble::rownames_to_column(data_deaths, "Day")
+data_deaths <- data_deaths %>%
+  mutate(Day = as.Date(Day,"%m/%d/%y"))
+
+# Melt the data
+d_deaths <- melt(data_deaths, id.vars="Day")
+
+# plot
+ggplot(d_deaths, aes(Day,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Deaths per Country") + 
+  xlab("Date") + 
+  ylab("Deaths")
+```
+
+Log2:
+
+```{r}
+ggplot(d_deaths, aes(Day,value, col=variable)) + 
+  geom_line() +
+  scale_y_continuous(trans = 'log2') +
+  ggtitle("Deaths per Country, log2 Scale on y axis") + 
+  xlab("Date") + 
+  ylab("Deaths")
+
+```
+
+
+
+```{r}
+deaths_from_one <- d_deaths %>%
+  filter(value > 0) %>%
+  group_by(variable) %>%
+  mutate(id = row_number())
+```
+
+
+
+```{r}
+ggplot(deaths_from_one, aes(id,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Deaths per Country from the 1st day of a Death") + 
+  xlab("Days since 1st death") + 
+  ylab("Deaths")
+```
+
+
+# Tote im Verhältnis zur Bevölkerung
+
+```{r}
+population <- read_delim("population.csv",  "\t", escape_double = FALSE, trim_ws = TRUE)
+```
+
+
+
+```{r}
+(population_subset <- population %>%
+  filter(`Country` == "China" | `Country` == "France" | `Country` == "Germany" | `Country` == "Italy" | `Country` == "United States" | `Country` == "New Zealand" | `Country` == "Israel") %>%
+  select(`Country`,Population) %>%
+  mutate(`Country` = replace(`Country`, `Country` == "United States","US")) %>%
+  rename(variable = `Country`) %>%
+  rename(population = Population)
+ )
+```
+
+
+```{r}
+deaths_vs_population <- d_deaths %>%
+  left_join(population_subset) %>%
+  mutate(value = (value/population)*100000)
+```
+
+
+```{r}
+  # plot
+ggplot(deaths_vs_population, aes(Day,value, col=variable)) + 
+  geom_line() +
+  ggtitle("Corona-related Deaths per 100.000 people per Country") + 
+  xlab("Date") + 
+  ylab("Number of Deaths per 100.000")
+```
+
+Log2:
+
+```{r}
+  # plot
+ggplot(deaths_vs_population, aes(Day,value, col=variable)) + 
+  #scale_x_continuous(trans = 'log2') +
+  scale_y_continuous(trans = 'log2') +
+  geom_line() +
+  ggtitle("Corona-related Deaths per 100.000 people per Country, log2 y-Axis") + 
+  xlab("Date") + 
+  ylab("Number of Deaths per 100.000")
+```
+
+Die Toten werden eventuell unterschiedlich gezählt, je nachdem ob Tote generell getestet werden oder ob nur diejenigen getestet werden, bei denen ein Verdacht bestand.
+
+# Comparing Corona to Influenza: Results III
+
+Die Daten wurden manuell von der [RKI-Seite mit den wöchentlichen Reports gezogen](https://influenza.rki.de/Wochenberichte.aspx). Bei der Influenza handelt es sich in der Regel um mehrere Viren, 2020 zum Beispiel Influenza A(H1N1)pdm09, Influenza A(H3N2) and Influenza B.
+
+```{r}
+grippe <- read_delim("grippe.csv", 
+    ";", escape_double = FALSE, col_types = cols(date = col_date(format = "%d.%m.%y"), 
+        infected = col_integer()), trim_ws = TRUE)
+```
+
+Zuerst die Infektionen:
+
+```{r}
+flu_vs_influenca_inf <- data %>%
+  select(Day,Germany) %>%
+  full_join(grippe, c("Day" = "date")) %>%
+  filter(Day > "2018-12-31") %>%
+  select(-deaths) %>%
+  rename(Corona = Germany) %>%
+  rename(Influenza = infected) 
+```
+
+```{r}
+# melt the data
+comparison_inf <- melt(flu_vs_influenca_inf, id.vars="Day")
+
+# remove NAs
+comparison_inf <- comparison_inf %>%
+  filter(!is.na(value))
+
+# plot
+ggplot(comparison_inf, aes(Day,value, col=variable)) + 
+  geom_line()  +
+  ggtitle("Influenza versus Corona Infections 2019/2020") + 
+  xlab("Date") + 
+  ylab("Accumulated Number of Infections")
+```
+
+
+Nun der Vergleich mit einer ganzen Influenza-Welle, hier 2017/2018, die als besonders hart gilt:
+
+```{r}
+data %>%
+  select(Day,Germany) %>%
+  full_join(grippe, c("Day" = "date")) %>%
+  select(-deaths) %>%
+  rename(Corona = Germany) %>%
+  rename(Influenza = infected) %>%
+  mutate(Influenza17_18 = case_when(Day < "2018-12-31" ~ Influenza)) %>%
+  mutate(Influenza19_20 = case_when(Day > "2018-12-31" ~ Influenza)) %>%
+  select(-Influenza) %>%
+  melt(., id.vars="Day") %>%
+  filter(!is.na(value)) %>%
+  mutate(week = lubridate::week((Day))) %>%
+  mutate(week = if_else(week > 38,week-53,week)) %>%
+  group_by(week, variable) %>%
+  summarize(value = max(value)) %>%
+  ggplot(aes(week,value, col=variable)) + 
+  geom_line()  +
+  ggtitle("Two Influenza Seasons compared to Corona") + 
+  xlab("Week") + 
+  ylab("Accumulated Number of reported Infections")
+
+```
+
+
+
+```{r}
+data_deaths %>%
+  select(Day,Germany) %>%
+  full_join(grippe, c("Day" = "date")) %>%
+  select(-infected) %>%
+  rename(Corona = Germany) %>%
+  rename(Influenza = deaths) %>%
+  mutate(Influenza17_18 = case_when(Day < "2018-12-31" ~ Influenza)) %>%
+  mutate(Influenza19_20 = case_when(Day > "2018-12-31" ~ Influenza)) %>%
+  select(-Influenza) %>%
+  melt(., id.vars="Day") %>%
+  filter(!is.na(value)) %>%
+  filter(value != 0) %>%
+  mutate(week = lubridate::week((Day))) %>%
+  mutate(week = if_else(week > 38,week-53,week)) %>%
+  group_by(week, variable) %>%
+  summarize(value = max(value)) %>%
+  ggplot(aes(week,value, col=variable)) + 
+  geom_line()  +
+  ggtitle("Deaths: Two Influenza Seasons compared to Corona in Germany") + 
+  xlab("Week") + 
+  ylab("Accumulated Number of reported Deaths")
+
+```
+
+
+
+
+
+Log2:
+
+```{r}
+data_deaths %>%
+  select(Day,Germany) %>%
+  full_join(grippe, c("Day" = "date")) %>%
+  select(-infected) %>%
+  rename(Corona = Germany) %>%
+  rename(Influenza = deaths) %>%
+  mutate(Influenza17_18 = case_when(Day < "2018-12-31" ~ Influenza)) %>%
+  mutate(Influenza19_20 = case_when(Day > "2018-12-31" ~ Influenza)) %>%
+  select(-Influenza) %>%
+  melt(., id.vars="Day") %>%
+  filter(!is.na(value)) %>%
+  filter(value != 0) %>%
+  mutate(week = lubridate::week((Day))) %>%
+  mutate(week = if_else(week > 38,week-53,week)) %>%
+  group_by(week, variable) %>%
+  summarize(value = max(value)) %>%
+  ggplot(aes(week,value, col=variable)) + 
+  geom_line()  +
+  scale_y_continuous(trans = 'log2') +
+  ggtitle("Deaths: Two Influenza Seasons compared to Corona in Germany, y axis log2") + 
+  xlab("Week") + 
+  ylab("Accumulated Number of reported Deaths")
+```
+
+
+
+# Rankings
+
+
+
+```{r}
+new_data <- corona_data %>%
+  rename(last_day = rev(names(corona_data))[1])
+
+```
+
+
+```{r}
+new_data %>%
+  group_by(`Country/Region`) %>%
+  select(-`Province/State`) %>%
+  select(-Lat,-Long) %>%
+  summarise_each(list(sum)) %>%
+  select(`Country/Region`,last_day) %>%
+  arrange(desc(last_day))
+```
+
+
+```{r}
+new_death_data <- corona_deaths %>%
+  rename(last_day = rev(names(corona_deaths))[1])
+```
+
+
+```{r}
+new_death_data %>%
+  group_by(`Country/Region`) %>%
+  select(-`Province/State`) %>%
+  select(-Lat,-Long) %>%
+  summarise_each(list(sum)) %>%
+  select(`Country/Region`,last_day) %>%
+  arrange(desc(last_day))
+```
+
